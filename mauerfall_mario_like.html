@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mauerfall Run – Mario‑like Edition (Single File)</title>
+<style>
+  :root { color-scheme: dark; --bg:#0c1117; --panel:#111826; --border:#263244; --accent:#7bd88f; --warn:#ff8e88; }
+  html,body{margin:0;padding:0;background:var(--bg);color:#e8eef7;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;}
+  header{position:fixed;inset:0 0 auto 0;display:flex;gap:10px;align-items:center;padding:10px 12px;background:linear-gradient(180deg,rgba(12,17,23,.9),rgba(12,17,23,.4));border-bottom:1px solid var(--border);backdrop-filter:blur(6px);z-index:3}
+  header h1{margin:0;font-size:14px;font-weight:600;opacity:.9}
+  button{background:var(--panel);border:1px solid var(--border);border-radius:10px;color:#e8eef7;padding:8px 10px;font-size:13px}
+  button:hover{border-color:#3a4c67}
+  #hud{position:fixed;right:10px;top:56px;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:13px;z-index:2;max-width:420px}
+  #hud h2{margin:.2rem 0 .4rem;font-size:14px}
+  #hud p{margin:.25rem 0}
+  #toast{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:13px;display:none;z-index:4}
+  #gamewrap{position:fixed;inset:52px 0 0 0}
+  canvas{width:100vw;height:calc(100vh - 52px);display:block;image-rendering:pixelated;touch-action:none}
+  #touch{position:fixed;left:0;right:0;bottom:24px;display:flex;justify-content:space-between;align-items:center;padding:0 18px;opacity:.12;user-select:none}
+  .btn{width:64px;height:64px;border:2px solid #93a1b2;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700}
+  @media (hover:none){#touch{opacity:.6}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Mauerfall Run – Mario‑like Edition</h1>
+  <button id="restart">Neu starten</button>
+  <div style="margin-left:auto;font-size:12px;opacity:.85">Steuerung: ← → laufen • Leertaste springen • R Reset</div>
+</header>
+
+<div id="gamewrap"><canvas id="game" width="1024" height="576" aria-label="Mauerfall Jump and Run"></canvas></div>
+<div id="hud"></div>
+<div id="toast" aria-live="polite"></div>
+
+<div id="touch">
+  <div class="btn" id="btnLeft">←</div>
+  <div class="btn" id="btnJump">⤴︎</div>
+  <div class="btn" id="btnRight">→</div>
+</div>
+
+<script>
+(function(){
+  const W=1024,H=576;
+  const canvas=document.getElementById('game'); const ctx=canvas.getContext('2d');
+  const hud=document.getElementById('hud'); const toastEl=document.getElementById('toast');
+  const restartBtn=document.getElementById('restart');
+
+  const world={ w:5200, h:H };
+  const cam={ x:0 };
+
+  const GRAV=0.7, MOVE=0.85, MAXVX=4.0, JUMP=-13, FRICTION=0.86, BOUNCE=-9.5;
+
+  const player={ x:60,y:0,w:18,h:28,vx:0,vy:0,facing:1,onGround:false, deaths:0, stars:0, inv:0, checkpoint:{x:60,y:0} };
+
+  const keys={};
+
+  const plats=[];
+  plats.push({x:0,y:H-48,w:world.w,h:48});
+  for(let i=0;i<40;i++){
+    plats.push({x:220+i*110, y:H-120 - (i%5)*26, w:90, h:14});
+  }
+
+  const wall={ x: world.w-520, y: 120, w: 26, h: H-120 };
+  const wallTop={ x: wall.x-200, y: 120, w: 230, h: 16 };
+  plats.push(wall, wallTop);
+
+  const flags=[
+    {x:900,y:H-120,w:14,h:72,saved:false,label:'Abschnitt A'},
+    {x:2100,y:H-120,w:14,h:72,saved:false,label:'Abschnitt B'},
+    {x:3300,y:H-120,w:14,h:72,saved:false,label:'Abschnitt C'}
+  ];
+
+  function mkEnemy(x,y,min,max,speed){ return {type:'stasi',x,y,w:20,h:18,dir:1,min,max,speed,dead:false,deathT:0}; }
+  const foes=[
+    mkEnemy(700,H-66,640,820,1.0),
+    mkEnemy(1250,H-146,1180,1320,1.1),
+    mkEnemy(1700,H-92,1660,1780,1.1),
+    mkEnemy(2350,H-172,2280,2420,1.2),
+    mkEnemy(2850,H-118,2780,2920,1.15),
+    mkEnemy(3600,H-144,3550,3680,1.2),
+  ];
+
+  const boss={ x: wall.x-120, y:H-96, w:28, h:26, dir:-1, min: wall.x-260, max: wall.x-60, speed:1.1, hp:5, inv:0, alive:true };
+
+  const gate={ x: wall.x+40, y:H-120, w: 12, h: 120, open:false };
+
+  const stars=[];
+  for(let i=0;i<18;i++){ stars.push({x:260+i*220, y:H-180-(i%5)*24, r:5, taken:false}); }
+
+  function onKey(e,down){
+    if(['ArrowLeft','ArrowRight','Space','KeyR'].includes(e.code)) e.preventDefault();
+    keys[e.code]=down;
+    if (down && e.code==='Space') jump();
+    if (down && e.code==='KeyR') respawn();
+  }
+  addEventListener('keydown', e=>onKey(e,true));
+  addEventListener('keyup', e=>onKey(e,false));
+
+  function bindTouch(id, code){
+    const el=document.getElementById(id);
+    const set=(d)=>{ keys[code]=d; if (d && code==='Space') jump(); };
+    ['touchstart','mousedown'].forEach(ev=>el.addEventListener(ev,e=>{ e.preventDefault(); set(true);}));
+    ['touchend','touchcancel','mouseup','mouseleave'].forEach(ev=>el.addEventListener(ev,e=>{ e.preventDefault(); set(false);}));
+  }
+  bindTouch('btnLeft','ArrowLeft'); bindTouch('btnRight','ArrowRight'); bindTouch('btnJump','Space');
+
+  restartBtn.addEventListener('click', ()=>boot());
+
+  function toast(t,frames=110){ toastEl.textContent=t; toastEl.style.display='block'; let c=frames; (function tick(){ c--; if(c<=0){ toastEl.style.display='none'; } else requestAnimationFrame(tick); })(); }
+
+  function rect(a,b){ return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y; }
+  function collideWorldX(obj){
+    obj.x += obj.vx;
+    for(const p of plats){
+      if(rect(obj,p)){
+        if(obj.vx>0) obj.x=p.x-obj.w; else if(obj.vx<0) obj.x=p.x+p.w;
+        obj.vx=0;
+      }
+    }
+  }
+  function collideWorldY(obj){
+    obj.y += obj.vy; obj.onGround=false;
+    for(const p of plats){
+      if(rect(obj,p)){
+        if(obj.vy>0){ obj.y=p.y-obj.h; obj.vy=0; obj.onGround=true; }
+        else if(obj.vy<0){ obj.y=p.y+p.h; obj.vy=0; }
+      }
+    }
+  }
+
+  function jump(){ if(player.onGround){ player.vy=JUMP; player.onGround=false; } }
+  function respawn(){
+    player.x=player.checkpoint.x; player.y=player.checkpoint.y;
+    player.vx=player.vy=0; player.onGround=false; player.inv=30;
+    toast('Zurück zum letzten Banner.');
+  }
+
+  function update(){
+    if(keys['ArrowLeft']){ player.vx -= MOVE; player.facing=-1; }
+    if(keys['ArrowRight']){ player.vx += MOVE; player.facing= 1; }
+    player.vx *= player.onGround?FRICTION:0.98;
+    player.vx = Math.max(-MAXVX, Math.min(MAXVX, player.vx));
+    player.vy += GRAV;
+
+    collideWorldX(player);
+    collideWorldY(player);
+
+    if(player.y>H+300){ player.deaths++; respawn(); }
+    if(player.inv>0) player.inv--;
+
+    for(const e of foes){
+      if(e.dead){
+        e.deathT--; continue;
+      }
+      e.x += e.dir*e.speed;
+      if(e.x<e.min || e.x>e.max) e.dir*=-1;
+      if(rect(player,e)){
+        const playerAbove = (player.vy>0) && (player.y + player.h - e.y < 14);
+        if(playerAbove){
+          e.dead=true; e.deathT=60;
+          player.vy = BOUNCE;
+          toast('Stasi ausgeschaltet');
+        }else if(player.inv===0){
+          player.deaths++; player.inv=40;
+          respawn();
+        }
+      }
+    }
+
+    if(boss.alive){
+      if(boss.inv>0) boss.inv--;
+      boss.x += boss.dir*boss.speed;
+      if(boss.x<boss.min || boss.x>boss.max) boss.dir*=-1;
+      if(rect(player,boss)){
+        const playerAbove = (player.vy>0) && (player.y + player.h - boss.y < 14);
+        if(playerAbove && boss.inv===0){
+          boss.hp--; boss.inv=30; player.vy=BOUNCE;
+          toast('Treffer am Boss ('+(5-boss.hp)+' / 5)');
+          if(boss.hp<=0){
+            boss.alive=false; gate.open=true;
+            toast('Boss besiegt! Grenzübergang öffnet sich!');
+          }
+        }else if(player.inv===0){
+          player.deaths++; player.inv=40; respawn();
+        }
+      }
+    }
+
+    for(const f of flags){
+      if(rect(player,f) && !f.saved){
+        f.saved=true; player.checkpoint={x:f.x, y:f.y-42};
+        toast('Checkpoint gespeichert: '+f.label);
+      }
+    }
+
+    for(const s of stars){
+      if(!s.taken){
+        const dx=(player.x+player.w/2)-s.x, dy=(player.y+player.h/2)-s.y;
+        if(dx*dx+dy*dy < (s.r+10)*(s.r+10)){ s.taken=true; player.stars++; }
+      }
+    }
+
+    cam.x = Math.max(0, Math.min(world.w -  W, player.x - W/2));
+
+    if(gate.open && player.x > wall.x + 60){
+      won=true;
+    }
+  }
+
+  function drawBackground(){
+    ctx.fillStyle='#0b1320'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#0e1b2e';
+    for(let i=0;i<60;i++){
+      const bx=(i*200 - cam.x*0.4)%(W+500)-250;
+      ctx.fillRect(bx, 280+(i%6)*16, 100, 300);
+    }
+    ctx.fillStyle='#14243b';
+    for(let i=0;i<60;i++){
+      const bx=(i*180 - cam.x*0.7)%(W+400)-200;
+      ctx.fillRect(bx, 340+(i%5)*10, 80, 240);
+    }
+  }
+
+  function draw(){
+    const ox=Math.floor(cam.x);
+    drawBackground();
+
+    for(const p of plats){
+      ctx.fillStyle=(p===wall || p===wallTop)?'#7a7a7a':'#2a3342';
+      ctx.fillRect(p.x-ox, p.y, p.w, p.h);
+      if(p===wall){
+        ctx.fillStyle='#999';
+        for(let i=0;i<p.h;i+=18){ ctx.fillRect(p.x-ox, p.y+i, p.w, 2); }
+      }
+    }
+
+    ctx.strokeStyle = gate.open ? '#7bd88f' : '#ffb3a7';
+    ctx.strokeRect(gate.x-ox, gate.y, gate.w, gate.h);
+    ctx.font='12px monospace';
+    ctx.fillStyle = gate.open ? '#7bd88f' : '#c0c7d0';
+    ctx.fillText(gate.open?'Übergang offen':'Grenze geschlossen', gate.x-ox-22, gate.y-8);
+
+    for(const f of flags){
+      ctx.fillStyle = f.saved ? '#ffd166' : '#f1a84b';
+      ctx.fillRect(f.x-ox, f.y, f.w, f.h);
+      ctx.fillStyle='#000'; ctx.fillRect(f.x-ox+3, f.y+4, f.w-6, 10);
+    }
+
+    for(const s of stars){
+      if(!s.taken){
+        ctx.fillStyle='#8ecbff';
+        ctx.beginPath(); ctx.arc(s.x-ox, s.y, s.r, 0, Math.PI*2); ctx.fill();
+      }
+    }
+
+    for(const e of foes){
+      if(e.dead){
+        ctx.fillStyle='rgba(255,94,94,'+(Math.max(0,e.deathT/60))+')';
+      }else{
+        ctx.fillStyle='#ff5e5e';
+      }
+      ctx.fillRect(e.x-ox, e.y, e.w, e.h);
+      ctx.fillStyle='#000'; ctx.fillRect(e.x-ox+5, e.y+4, 6, 3);
+    }
+
+    if(boss.alive){
+      ctx.fillStyle = boss.inv>0 ? 'rgba(255,80,80,0.6)' : '#ff5050';
+      ctx.fillRect(boss.x-ox, boss.y, boss.w, boss.h);
+      ctx.fillStyle='#000'; ctx.fillRect(boss.x-ox+6, boss.y+5, 8, 4);
+      ctx.fillStyle='#222'; ctx.fillRect(boss.x-ox-6, boss.y-10, boss.w+12, 6);
+      ctx.fillStyle='#7bd88f'; ctx.fillRect(boss.x-ox-6, boss.y-10, (boss.w+12)*(boss.hp/5), 6);
+    }else{
+      ctx.fillStyle='rgba(200,200,200,0.6)';
+      ctx.beginPath(); ctx.arc((boss.x-ox)+boss.w/2, boss.y+boss.h/2, 12, 0, Math.PI*2); ctx.fill();
+    }
+
+    ctx.fillStyle = player.inv>0 ? 'rgba(124,241,167,0.6)' : '#7cf1a7';
+    ctx.fillRect(player.x-ox, player.y, player.w, player.h);
+    ctx.fillStyle='#cdebd2'; ctx.fillRect(player.x-ox+4, player.y-8, 10, 8);
+    ctx.fillStyle='#000'; ctx.fillRect(player.x-ox+(player.facing>0?12:2), player.y-6, 2, 2);
+
+    hud.innerHTML = `<h2>Mauerfall – Mario‑like</h2>
+      <p>Sammle Sterne (optional), springe auf Stasi-Gegner, aktiviere Banner (Checkpoints), besiege den Boss vor der Mauer.</p>
+      <p>Deaths: <strong>${player.deaths}</strong> &nbsp;|&nbsp; Sterne: <strong>${player.stars}</strong> &nbsp;|&nbsp; Boss-Status: <strong>${boss.alive? ('HP '+boss.hp):'besiegt'}</strong></p>`;
+
+    if(won){
+      ctx.fillStyle='rgba(0,0,0,0.7)'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle='#7bd88f'; ctx.font='26px monospace';
+      ctx.fillText('Die Mauer ist überwunden – Glückwunsch!', 170, H/2 - 16);
+      ctx.fillStyle='#e8eef7'; ctx.font='16px monospace';
+      ctx.fillText('9. November 1989 – Friedliche Öffnung der Grenze', 220, H/2 + 14);
+    }
+  }
+
+  let won=false;
+  function loop(){ update(); draw(); if(!won) requestAnimationFrame(loop); }
+  function boot(){
+    player.x=60; player.y=0; player.vx=player.vy=0; player.onGround=false; player.deaths=0; player.stars=0; player.inv=0; player.checkpoint={x:60,y:0};
+    foes.forEach((e)=>{ e.dead=false; e.deathT=0; e.dir=1; });
+    boss.alive=true; boss.hp=5; boss.inv=0; boss.x=wall.x-120; gate.open=false;
+    flags.forEach(f=>f.saved=false);
+    stars.forEach(s=>s.taken=false);
+    cam.x=0; won=false;
+    toast('Springe auf Gegner. Besiege den Boss vor der Mauer!');
+    requestAnimationFrame(loop);
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>
